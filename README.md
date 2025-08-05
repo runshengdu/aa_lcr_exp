@@ -4,7 +4,7 @@ license: apache-2.0
 
 # Artificial Analysis Long Context Reasoning (AA-LCR) Dataset
 
-AA-LCR is 100 hard text-based questions that require reasoning across multiple real-world documents that represent ~100k input tokens. Questions are designed so answers cannot be directly found but must be reasoned from multiple information sources, with human testing verifying that each question requires genuine inference rather than retrieval. 
+AA-LCR includes 100 hard text-based questions that require reasoning across multiple real-world documents, with each document set averaging ~100k input tokens. Questions are designed such that answers cannot be directly retrieved from documents and must instead be reasoned from multiple information sources.
 
 ## Dataset Development
 
