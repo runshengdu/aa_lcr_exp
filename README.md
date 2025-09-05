@@ -127,6 +127,30 @@ Examples of other types of questions include:
 - **Temporal and Conditional Logic Analysis:** Track time-series trends, implement conditional decision rules, and determine threshold-based alerts or actions
 - **Research and Classification:** Analyze patterns, classify and identify relevant documents to recall specific information
 
+**Prompt Template:**
+
+We load the relevant documents for each question into context in the same prompt as the question text.
+
+```python
+documents_text = "\n\n".join(f"BEGIN DOCUMENT {i + 1}:\n{doc}\nEND DOCUMENT {i + 1}" for i, doc in enumerate(docs))
+prompt = """BEGIN INPUT DOCUMENTS
+
+{documents_text}
+
+END INPUT DOCUMENTS
+
+Answer the following question using the input documents provided above.
+
+START QUESTION
+
+{question}
+
+END QUESTION
+"""
+```
+
+Reported token counts per question are based on the completed prompt, using the `cl100k_base` tokenizer from `tiktoken`.
+
 ## Scoring Approach
 
 We use an LLM-based equality checker to evaluate responses:
