@@ -8,7 +8,7 @@ AA-LCR includes 100 hard text-based questions that require reasoning across mult
 
 ## Dataset Development
 
-AA-LCR was created through a rigorous multi-phase process involving several members of the Artificial Analysis research team and more than a dozen undergraduate students who were engaged on a short-term contract basis to write and/or validate questions. 
+AA-LCR was created through a rigorous multi-phase process involving several members of the Artificial Analysis research team and more than a dozen undergraduate students who were engaged on a short-term contract basis to write and/or validate questions.
 
 **Document Curation**: We selected diverse document sets (company reports, government consultations, legal documents, academic papers) averaging ~100,000 tokens each, representing real materials knowledge workers analyze.
 
@@ -26,9 +26,9 @@ This approach validates that AA-LCR tests genuine reasoning capabilities rather 
 
 ## Technical Details
 
-AA-LCR comprises 100 questions across 7 types of text-only documents (i.e. Company Reports, Industry Reports, Government Consultations, Academia, Legal, Marketing Materials and Survey Reports). Multiple independent documents, forming a Document Set with a total length of ~100k tokens are passed as context for each question. For instance, the Company Documents topic includes separate document sets containing 2023 and 2024 company reports, respectively. 
+AA-LCR comprises 100 questions across 7 types of text-only documents (i.e. Company Reports, Industry Reports, Government Consultations, Academia, Legal, Marketing Materials and Survey Reports). Multiple independent documents, forming a Document Set with a total length of ~100k tokens are passed as context for each question. For instance, the Company Documents topic includes separate document sets containing 2023 and 2024 company reports, respectively.
 
-Each question requires using the Document Set and applying general and mathematical reasoning. 
+Each question requires using the Document Set and applying general and mathematical reasoning.
 
 <div class="overflow-x-auto my-6">
   <table class="min-w-full border border-gray-300 bg-white">
@@ -113,11 +113,11 @@ Each question requires using the Document Set and applying general and mathemati
 
 **Sample Question:**
 
-\`\`\`json
+```json
 For the company and quarter where the company reported a 13.5% decline on the prior quarters operating income. What was their adjusted EBITDA? List the company name and adjusted EBITDA
 
 Answer: Equinix, $901 million
-\`\`\`
+```
 
 Examples of other types of questions include:
 
@@ -155,7 +155,7 @@ Reported token counts per question are based on the completed prompt, using the 
 
 We use an LLM-based equality checker to evaluate responses:
 
-\`\`\`
+```
 Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.
 For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.
 
@@ -164,8 +164,7 @@ The OFFICIAL ANSWER: {official_answer}
 CANDIDATE ANSWER TO ASSESS: {candidate_answer}
 
 Reply only with CORRECT or INCORRECT.
-
-\`\`\`
+```
 
 Qwen3 235B A22B 2507 Non-reasoning is used as the equality checker model.
 
@@ -175,11 +174,17 @@ The AA-LCR dataset is available at [https://huggingface.co/datasets/ArtificialAn
 
 If you use AA-LCR in your research, please cite:
 
-\`\`\`json
+```json
 @dataset{artificialanalysis2025lcr,
   title={Artificial Analysis Long Context Reasoning Benchmark(LCR)},
   author={Artificial Analysis Team},
   year={2025},
   publisher={Artificial Analysis, Inc.}
 }
-\`\`\`
+```
+
+## License
+
+**Question set**: Licensed under the Apache License 2.0
+
+**Document set**: Provided as a text representation of documents publicly available at time of dataset creation. We do not claim copyright or place any license over this data.
