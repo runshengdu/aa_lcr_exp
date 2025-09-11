@@ -1,5 +1,10 @@
 ---
 license: apache-2.0
+configs:
+- config_name: default
+  data_files:
+  - split: test
+    path: "AA-LCR_Dataset.csv"
 ---
 
 # Artificial Analysis Long Context Reasoning (AA-LCR) Dataset
