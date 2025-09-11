@@ -164,6 +164,7 @@ The OFFICIAL ANSWER: {official_answer}
 CANDIDATE ANSWER TO ASSESS: {candidate_answer}
 
 Reply only with CORRECT or INCORRECT.
+
 ```
 
 Qwen3 235B A22B 2507 Non-reasoning is used as the equality checker model.
