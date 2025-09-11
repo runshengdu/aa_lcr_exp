@@ -129,7 +129,7 @@ Examples of other types of questions include:
 
 **Prompt Template:**
 
-We load the relevant documents for each question into context in the same prompt as the question text.
+We load the relevant documents for each question into context in the same prompt as the question text. Pre-extracted document text can be found in AA-LCR_extracted-text.zip.
 
 ```python
 documents_text = "\n\n".join(f"BEGIN DOCUMENT {i + 1}:\n{doc}\nEND DOCUMENT {i + 1}" for i, doc in enumerate(docs))
