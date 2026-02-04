@@ -1,12 +1,3 @@
----
-license: apache-2.0
-configs:
-- config_name: default
-  data_files:
-  - split: test
-    path: "AA-LCR_Dataset.csv"
----
-
 # Artificial Analysis Long Context Reasoning (AA-LCR) Dataset
 
 AA-LCR includes 100 hard text-based questions that require reasoning across multiple real-world documents, with each document set averaging ~100k input tokens. Questions are designed such that answers cannot be directly retrieved from documents and must instead be reasoned from multiple information sources.
@@ -132,107 +123,71 @@ Examples of other types of questions include:
 - **Temporal and Conditional Logic Analysis:** Track time-series trends, implement conditional decision rules, and determine threshold-based alerts or actions
 - **Research and Classification:** Analyze patterns, classify and identify relevant documents to recall specific information
 
-**Prompt Template:**
+## Running the Evaluation
 
-We load the relevant documents for each question into context in the same prompt as the question text. Pre-extracted document text can be found in AA-LCR_extracted-text.zip.
+### Prerequisites
+
+Ensure you have Python installed and the following dependencies:
+
+```bash
+pip install openai tiktoken pyyaml tqdm
+```
+
+### Configuration
+
+Configure your models in `models.yaml`. The benchmark uses a judge model (default: `deepseek-chat`) to evaluate answers.
+
+### Execution
+
+Run the evaluation script `main.py`:
+
+```bash
+python main.py --model-id <your-model-id>
+```
+
+Arguments:
+- `--model-id`: The ID of the model to evaluate (must be defined in `models.yaml`).
+- `--num-tasks`: (Optional) Number of tasks to run (useful for testing).
+- `--save-to`: (Optional) Custom path to save the JSONL results.
+- `--max-concurrency`: (Default: 20) Maximum number of concurrent API calls.
+
+### Output
+
+Results are saved to `results/<model_id>/<timestamp>.jsonl`.
+- The file includes a real-time statistics header in the first line.
+- A progress bar in the terminal shows completion status and failed tasks.
+- Failed tasks (after retries) are logged to the terminal and excluded from the output file.
+
+## Prompt Template
+
+We load the relevant documents for each question into context in the same prompt as the question text. Pre-extracted document text can be found in `dataset/AA-LCR_extracted-text`.
 
 ```python
-documents_text = "\n\n".join(f"BEGIN DOCUMENT {i + 1}:\n{doc}\nEND DOCUMENT {i + 1}" for i, doc in enumerate(docs))
-prompt = """BEGIN INPUT DOCUMENTS
-
-{documents_text}
-
-END INPUT DOCUMENTS
-
-Answer the following question using the input documents provided above.
-
-START QUESTION
-
-{question}
-
-END QUESTION
-"""
+documents_text = "\n\n".join(f"BEGIN DOCUMENT {i+1}:\n{d}\nEND DOCUMENT {i+1}" for i, d in enumerate(docs))
+task_prompt = (
+    f"BEGIN INPUT DOCUMENTS\n\n{documents_text}\n\nEND INPUT DOCUMENTS\n\n"
+    f"Answer the following question using the input documents provided above.\n\n"
+    f"START QUESTION\n\n{question}\n\nEND QUESTION\n"
+)
 ```
 
 Reported token counts per question are based on the completed prompt, using the `cl100k_base` tokenizer from `tiktoken`.
 
-The order in which documents are loaded in matters - they should be added to the prompt template in the order of the filenames in `data_source_filenames`. Below are code snippets showing how we read the questions and extracted text files from disk.
-
-```
-def load_questions(self) -> list[dict]:
-    """Load LCR questions from HuggingFace dataset"""
-    csv_path = hf_hub_download(
-        repo_id="ArtificialAnalysis/AA-LCR",
-        filename="AA-LCR_Dataset.csv",
-        repo_type="dataset",
-    )
-
-    questions = []
-    with open(csv_path, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # Parse data_source_filenames as ordered list
-            if "data_source_filenames" in row and isinstance(row["data_source_filenames"], str):
-                row["data_source_filenames"] = row["data_source_filenames"].split(";")
-
-            # Parse answer as list (semicolon-separated criteria)
-            if "answer" in row and isinstance(row["answer"], str):
-                row["answer"] = row["answer"].split(";")
-            questions.append(row)
-
-    return questions
-
-def get_document_set(
-    self, dataset_folder: str, document_category: str, document_set_id: str, data_source_filenames: list[str]
-) -> list[str]:
-    """Get document set for a question in the order specified by data_source_filenames"""
-
-    # Documents are extracted to lcr/lcr/{category}/{set_id}/ from the HuggingFace zip
-    document_set_path = os.path.join(dataset_folder, document_category, document_set_id)
-
-    document_texts = []
-    for filename in data_source_filenames:
-        document_path = os.path.join(document_set_path, filename)
-        with open(document_path, encoding="utf-8") as f:
-            document_texts.append(f.read())
-    return document_texts
-```
+The order in which documents are loaded in matters - they should be added to the prompt template in the order of the filenames in `data_source_filenames`.
 
 ## Scoring Approach
 
-We use an LLM-based equality checker to evaluate responses:
+We use an LLM-based equality checker to evaluate responses (implemented in `grader.py`):
 
-```
-Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.
-For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.
-
-The question, for reference only: {question}
-The OFFICIAL ANSWER: {official_answer}
-CANDIDATE ANSWER TO ASSESS: {candidate_answer}
-
-Reply only with CORRECT or INCORRECT.
-
-```
-
-Qwen3 235B A22B 2507 Non-reasoning is used as the equality checker model.
-
-## Access and Citation
-
-The AA-LCR dataset is available at [https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR](https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR).
-
-If you use AA-LCR in your research, please cite:
-
-```json
-@dataset{artificialanalysis2025lcr,
-  title={Artificial Analysis Long Context Reasoning Benchmark(LCR)},
-  author={Artificial Analysis Team},
-  year={2025},
-  publisher={Artificial Analysis, Inc.}
-}
+```python
+judge_prompt = (
+    "Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.\n"
+    "For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.\n\n"
+    f"The question, for reference only: {question}\n"
+    f"The OFFICIAL ANSWER: {gold_answer}\n"
+    f"CANDIDATE ANSWER TO ASSESS: {llm_answer}\n\n"
+    "Reply only with CORRECT or INCORRECT.\n"
+)
 ```
 
-## License
-
-**Question set**: Licensed under the Apache License 2.0
-
-**Document set**: Provided as a text representation of documents publicly available at time of dataset creation. We do not claim copyright or place any license over this data.
+The default judge model is configured in `main.py` (e.g., `doubao-seed-1-8-251228`).
