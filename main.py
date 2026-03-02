@@ -17,10 +17,9 @@ DATASET_CSV_PATH = BASE_DIR / "dataset/AA-LCR_Dataset.csv"
 EXTRACTED_TEXT_ROOT = BASE_DIR / "dataset/AA-LCR_extracted-text"
 MODELS_YAML_PATH = BASE_DIR / "models.yaml"
 
-DEFAULT_CONTEXT_LENGTH_TOKENS = int(128000*0.9)
-DEFAULT_JUDGE_MODEL_ID = "doubao-seed-1-8-251228"
-DEFAULT_MAX_CONCURRENCY = 20
+DEFAULT_CONTEXT_LENGTH_TOKENS = int(200000*0.9)
 DEFAULT_RETRIES = 3
+DEFAULT_MAX_CONCURRENCY = 5
 
 
 def load_models_yaml(path: Path) -> dict[str, ModelConfig]:
@@ -158,39 +157,20 @@ async def run(args: argparse.Namespace) -> int:
     models = load_models_yaml(MODELS_YAML_PATH)
     if args.model_id not in models:
         raise SystemExit(f"--model-id not found in {MODELS_YAML_PATH}: {args.model_id}")
-    if DEFAULT_JUDGE_MODEL_ID not in models:
-        raise SystemExit(f"Judge model {DEFAULT_JUDGE_MODEL_ID} not found in {MODELS_YAML_PATH}")
+    if args.judge_id not in models:
+        raise SystemExit(f"Judge model {args.judge_id} not found in {MODELS_YAML_PATH}")
 
     model_cfg = models[args.model_id]
-    judge_cfg = models[DEFAULT_JUDGE_MODEL_ID]
+    judge_cfg = models[args.judge_id]
     
     save_path = Path(args.save_to) if args.save_to else Path("results") / args.model_id.replace("/", "__") / f"{dt.datetime.now():%Y%m%d_%H%M%S}.jsonl"
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     done_ids = set()
-    if save_path.exists():
-        with save_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                if (s := line.strip()) and (obj := json.loads(s)) and "question_id" in obj:
-                    done_ids.add(str(obj["question_id"]))
-
-    rows = sorted(load_questions(DATASET_CSV_PATH), key=lambda r: int(str(r.get("question_id", "0") or "0")))
-    pending_rows = [r for r in rows if str(r.get("question_id", "")).strip() not in done_ids]
-    if args.num_tasks is not None:
-        pending_rows = pending_rows[: args.num_tasks]
-
-    if not pending_rows and not save_path.exists():
-        return 0
-
-    encoder = tiktoken.get_encoding("cl100k_base")
-    semaphore = asyncio.Semaphore(args.max_concurrency)
-
-    # Stats initialization
+    existing_lines = []
     correct_count = 0
     total_count = 0
     
-    # Check existing file content
-    existing_lines = []
     if save_path.exists():
         with save_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -202,12 +182,27 @@ async def run(args: argparse.Namespace) -> int:
                     # Check if it is a stats header
                     if "_meta_stats" in obj:
                         continue
+                    
+                    if "question_id" in obj:
+                        done_ids.add(str(obj["question_id"]))
+
                     existing_lines.append(line)
                     total_count += 1
                     if obj.get("judge_result") == "CORRECT":
                         correct_count += 1
                 except Exception:
                     pass
+
+    rows = sorted(load_questions(DATASET_CSV_PATH), key=lambda r: int(str(r.get("question_id", "0") or "0")))
+    pending_rows = [r for r in rows if str(r.get("question_id", "")).strip() not in done_ids]
+    if args.num_tasks is not None:
+        pending_rows = pending_rows[: args.num_tasks]
+
+    if not pending_rows and not save_path.exists():
+        return 0
+
+    encoder = tiktoken.get_encoding("cl100k_base")
+    semaphore = asyncio.Semaphore(args.max_concurrency)
 
     # Function to create padded header
     def make_header(correct, total):
@@ -292,7 +287,8 @@ async def run(args: argparse.Namespace) -> int:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-id", type=str, default=DEFAULT_JUDGE_MODEL_ID)
+    parser.add_argument("--model-id", type=str, default=None)
+    parser.add_argument("--judge-id", type=str, default="qwen3.5-plus")
     parser.add_argument("--num-tasks", type=int)
     parser.add_argument("--save-to")
     parser.add_argument("--max-concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY)
