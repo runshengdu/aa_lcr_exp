@@ -1,303 +1,244 @@
 import argparse
 import asyncio
-import csv
 import datetime as dt
 import json
 from pathlib import Path
 from typing import Any
-import yaml
 import tiktoken
 from tqdm import tqdm
-from utils import ModelConfig, expand_env_vars, call_chat_completion
-from grader import grade_answer
 
-# Configuration
-BASE_DIR = Path(__file__).parent
-DATASET_CSV_PATH = BASE_DIR / "dataset/AA-LCR_Dataset.csv"
-EXTRACTED_TEXT_ROOT = BASE_DIR / "dataset/AA-LCR_extracted-text"
-MODELS_YAML_PATH = BASE_DIR / "models.yaml"
-
-DEFAULT_CONTEXT_LENGTH_TOKENS = int(200000*0.9)
-DEFAULT_RETRIES = 3
-DEFAULT_MAX_CONCURRENCY = 5
-
-
-def load_models_yaml(path: Path) -> dict[str, ModelConfig]:
-    if not path.exists():
-        raise FileNotFoundError(f"{path} not found.")
-        
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    models = data.get("models", [])
-    if not isinstance(models, list):
-        raise RuntimeError(f"Invalid models list in {path}.")
-
-    out = {}
-    for m in models:
-        if not isinstance(m, dict) or not (name := str(m.get("name", "")).strip()):
-            continue
-
-        if not (api_key := str(m.get("api_key", "")).strip()):
-            raise RuntimeError(f"Missing api_key for model {name} in {path}.")
-            
-        if not (base_url := str(m.get("base_url", "")).strip()):
-            raise RuntimeError(f"Missing base_url for model {name} in {path}.")
-
-        out[name] = ModelConfig(
-            model_id=name,
-            temperature=float(m.get("temperature", 1.0)),
-            base_url=base_url,
-            api_key=expand_env_vars(api_key),
-            extra_body=m.get("extra_body") if isinstance(m.get("extra_body"), dict) else None,
-            max_tokens=int(m.get("max_tokens", 2048)),
-        )
-    return out
+from src.aa_lcr import (
+    DATASET_CSV_PATH,
+    MODELS_YAML_PATH,
+    DEFAULT_CONTEXT_LENGTH_TOKENS,
+    DEFAULT_RETRIES,
+    DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_EVAL_WORKERS,
+    get_task_prompt_for_row_or_skip,
+    load_models_yaml,
+    load_questions,
+    make_jsonl_stats_line,
+    read_jsonl_data_line_strings,
+    read_results_jsonl_state,
+    need_evaluation,
+    count_stats_4a,
+    write_jsonl_atomic,
+)
+from src.utils import ModelConfig, call_chat_completion
+from src.grader import grade_answer
 
 
-def load_questions(csv_path: Path) -> list[dict[str, Any]]:
-    with csv_path.open("r", encoding="utf-8", newline="") as f:
-        return [
-            {**row, "data_source_filenames": row["data_source_filenames"].split(";")}
-            if "data_source_filenames" in row and isinstance(row["data_source_filenames"], str)
-            else row
-            for row in csv.DictReader(f)
-        ]
-
-
-def load_document_set(document_category: str, document_set_id: str, data_source_filenames: list[str]) -> list[str]:
-    doc_dir = EXTRACTED_TEXT_ROOT / document_category / document_set_id
-    texts = []
-    for filename in data_source_filenames:
-        doc_path = doc_dir / filename
-        if doc_path.exists():
-            texts.append(doc_path.read_text(encoding="utf-8", errors="replace"))
-    return texts
-
-
-async def process_one_question(
+async def process_one_question_generate(
     *,
     row: dict,
     model_cfg: ModelConfig,
-    judge_cfg: ModelConfig,
     encoder,
     context_length: int,
     retries: int,
     semaphore: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    qid = str(row.get("question_id", "")).strip()
-    question = str(row.get("question", "")).strip()
-    gold_answer = str(row.get("answer", "")).strip()
-    
-    result_base = {
-        "question_id": qid,
-        "question": question,
-        "gold_answer": gold_answer,
-        "llm_answer": "",
-        "judge_result": "SKIPPED",
-        "prompt_token": 0,
-        "completion_token": 0,
-    }
+    """仅生成，不含 judge；成功时 judge_result 为空串。"""
+    prep = get_task_prompt_for_row_or_skip(
+        row=row, encoder=encoder, context_length=context_length, model_cfg=model_cfg
+    )
+    if not prep.get("ok"):
+        return prep["record"]
+
+    result_base = prep["result_base"]
+    task_prompt = prep["task_prompt"]
+    max_completion_tokens = prep["max_completion_tokens"]
 
     try:
-        filenames = row.get("data_source_filenames", [])
-        if not isinstance(filenames, list):
-            filenames = []
-            
-        docs = load_document_set(
-            str(row.get("document_category", "")).strip(),
-            str(row.get("document_set_id", "")).strip(),
-            filenames
-        )
-        
-        doc_tokens_sum = sum(len(encoder.encode(d)) for d in docs)
-        if doc_tokens_sum > context_length:
-            return {**result_base, "skipped_reason": f"docs_tokens_sum({doc_tokens_sum}) > context_length({context_length})"}
-
-        documents_text = "\n\n".join(f"BEGIN DOCUMENT {i+1}:\n{d}\nEND DOCUMENT {i+1}" for i, d in enumerate(docs))
-        task_prompt = (
-            f"BEGIN INPUT DOCUMENTS\n\n{documents_text}\n\nEND INPUT DOCUMENTS\n\n"
-            f"Answer the following question using the input documents provided above.\n\n"
-            f"START QUESTION\n\n{question}\n\nEND QUESTION\n"
-        )
-        
-        prompt_tokens_est = len(encoder.encode(task_prompt))
-        max_completion_tokens = min(model_cfg.max_tokens, max(0, context_length - prompt_tokens_est))
-        
-        if max_completion_tokens <= 0:
-            return {**result_base, "skipped_reason": f"prompt_tokens({prompt_tokens_est}) >= context_length({context_length})"}
-
         async with semaphore:
             llm_answer, usage = await call_chat_completion(
                 model_cfg=model_cfg, prompt=task_prompt, max_tokens=max_completion_tokens, retries=retries
             )
 
-        judge_result, judge_usage = await grade_answer(
-            question=question,
-            gold_answer=gold_answer,
-            llm_answer=llm_answer,
-            judge_cfg=judge_cfg,
-            encoder=encoder,
-            context_length=context_length,
-            retries=retries,
-            semaphore=semaphore,
-        )
-
         return {
             **result_base,
             "llm_answer": llm_answer,
-            "judge_result": judge_result,
+            "judge_result": "",
             "prompt_token": usage["prompt_tokens"],
             "completion_token": usage["completion_tokens"],
         }
-        
     except Exception as e:
         return {**result_base, "judge_result": "ERROR", "error": f"{type(e).__name__}: {e}"}
 
 
-async def run(args: argparse.Namespace) -> int:
+async def run_generate(args: argparse.Namespace) -> int:
     models = load_models_yaml(MODELS_YAML_PATH)
-    if args.model_id not in models:
-        raise SystemExit(f"--model-id not found in {MODELS_YAML_PATH}: {args.model_id}")
-    if args.judge_id not in models:
-        raise SystemExit(f"Judge model {args.judge_id} not found in {MODELS_YAML_PATH}")
+    if not args.model_id or args.model_id not in models:
+        raise SystemExit(f"--model-id 必填，且在 {MODELS_YAML_PATH} 中存在: {getattr(args, 'model_id', None)!r}")
+    if args.evaluation_file is not None:
+        raise SystemExit("生成模式请不要传 --evaluation-file")
 
     model_cfg = models[args.model_id]
-    judge_cfg = models[args.judge_id]
-    
-    save_path = Path(args.save_to) if args.save_to else Path("results") / args.model_id.replace("/", "__") / f"{dt.datetime.now():%Y%m%d_%H%M%S}.jsonl"
+
+    save_path = (
+        Path(args.save_to)
+        if args.save_to
+        else Path("results") / args.model_id.replace("/", "__") / f"{dt.datetime.now():%Y%m%d_%H%M%S}.jsonl"
+    )
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    done_ids = set()
-    existing_lines = []
-    correct_count = 0
-    total_count = 0
-    
-    if save_path.exists():
-        with save_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    # Check if it is a stats header
-                    if "_meta_stats" in obj:
-                        continue
-                    
-                    if "question_id" in obj:
-                        done_ids.add(str(obj["question_id"]))
-
-                    existing_lines.append(line)
-                    total_count += 1
-                    if obj.get("judge_result") == "CORRECT":
-                        correct_count += 1
-                except Exception:
-                    pass
+    done_ids, existing_data_lines, _c, _t = read_results_jsonl_state(save_path)
+    all_data_lines: list[str] = list(existing_data_lines)
 
     rows = sorted(load_questions(DATASET_CSV_PATH), key=lambda r: int(str(r.get("question_id", "0") or "0")))
     pending_rows = [r for r in rows if str(r.get("question_id", "")).strip() not in done_ids]
     if args.num_tasks is not None:
         pending_rows = pending_rows[: args.num_tasks]
 
-    if not pending_rows and not save_path.exists():
-        return 0
-
-    encoder = tiktoken.get_encoding("cl100k_base")
-    semaphore = asyncio.Semaphore(args.max_concurrency)
-
-    # Function to create padded header
-    def make_header(correct, total):
-        acc = (correct / total * 100) if total > 0 else 0.0
-        data = {
-            "_meta_stats": True,
-            "accuracy": f"{acc:.2f}%",
-            "correct": correct,
-            "total": total,
-            "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        json_str = json.dumps(data)
-        # Pad to 200 chars to ensure enough space for future updates without shifting content
-        return f"{json_str:<200}\n"
-
-    # Rewrite file with header + existing content
-    with save_path.open("w", encoding="utf-8") as f:
-        f.write(make_header(correct_count, total_count))
-        for line in existing_lines:
-            f.write(line + "\n")
-
     if not pending_rows:
         return 0
 
-    async def worker(row):
-        return await process_one_question(
-            row=row,
-            model_cfg=model_cfg,
-            judge_cfg=judge_cfg,
-            encoder=encoder,
-            context_length=DEFAULT_CONTEXT_LENGTH_TOKENS,
-            retries=DEFAULT_RETRIES,
-            semaphore=semaphore,
+    encoder = tiktoken.get_encoding("cl100k_base")
+    sem = asyncio.Semaphore(args.gen_workers)
+    pbar = tqdm(total=len(pending_rows), desc="Generate", unit="task")
+    failed = 0
+
+    tasks = [
+        asyncio.create_task(
+            process_one_question_generate(
+                row=r,
+                model_cfg=model_cfg,
+                encoder=encoder,
+                context_length=DEFAULT_CONTEXT_LENGTH_TOKENS,
+                retries=DEFAULT_RETRIES,
+                semaphore=sem,
+            )
         )
-
-    tasks = [asyncio.create_task(worker(r)) for r in pending_rows]
-    
-    # Progress bar setup
-    pbar = tqdm(total=len(tasks), desc="Processing", unit="task")
-    failed_count = 0
-
-    # Open in r+ mode to allow seeking to beginning for header updates
-    with save_path.open("r+", encoding="utf-8") as out_f:
-        # Move to end for appending new results
-        out_f.seek(0, 2)
-        
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            
-            # Check for failure
-            if result.get("judge_result") == "ERROR":
-                failed_count += 1
-                qid = result.get("question_id", "Unknown")
-                err_msg = result.get("error", "Unknown error")
-                pbar.write(f"FAILED [QID: {qid}]: {err_msg}")
-                pbar.set_postfix(failed=failed_count, refresh=False)
-                pbar.update(1)
-                continue  # Skip writing to file
-
-            # Update stats
-            total_count += 1
-            if result.get("judge_result") == "CORRECT":
-                correct_count += 1
-            
-            # Write result at the end
-            out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
-            
-            # Update header at the beginning
-            current_pos = out_f.tell()
-            out_f.seek(0)
-            out_f.write(make_header(correct_count, total_count))
-            out_f.seek(current_pos)
-            out_f.flush()
-            
-            pbar.set_postfix(failed=failed_count, refresh=False)
+        for r in pending_rows
+    ]
+    for coro in asyncio.as_completed(tasks):
+        result = await coro
+        if result.get("judge_result") == "ERROR":
+            if "error" in result and result.get("error") is not None:
+                failed += 1
+                pbar.write(f"FAILED [QID: {result.get('question_id')}]: {result.get('error', '')}")
+            pbar.set_postfix(failed=failed, refresh=False)
             pbar.update(1)
-            
+            continue
+        all_data_lines.append(json.dumps(result, ensure_ascii=False))
+        write_jsonl_atomic(save_path, header_line=None, data_line_strings=all_data_lines)
+        pbar.set_postfix(failed=failed, refresh=False)
+        pbar.update(1)
     pbar.close()
-
     return 0
 
 
-def main():
+async def run_evaluate(args: argparse.Namespace) -> int:
+    path = Path(args.evaluation_file)
+    if not path.is_file():
+        raise SystemExit(f"--evaluation-file 不存在: {path}")
+
+    models = load_models_yaml(MODELS_YAML_PATH)
+    if args.judge_id not in models:
+        raise SystemExit(f"Judge {args.judge_id!r} not found in {MODELS_YAML_PATH}")
+    judge_cfg = models[args.judge_id]
+
+    _h, data_line_strings = read_jsonl_data_line_strings(path)
+    data_objs: list[dict[str, Any]] = []
+    for line in data_line_strings:
+        try:
+            o = json.loads(line)
+        except Exception as e:
+            raise SystemExit(f"非合法 JSON 的数据行: {e}") from e
+        if not isinstance(o, dict):
+            raise SystemExit("仅支持每行为一个 JSON 对象。")
+        data_objs.append(o)
+
+    idx_work = [i for i, o in enumerate(data_objs) if need_evaluation(o)]
+    encoder = tiktoken.get_encoding("cl100k_base")
+    sem = asyncio.Semaphore(int(args.eval_workers))
+    pbar = tqdm(total=len(idx_work), desc="Evaluate", unit="row")
+
+    async def eval_one(i: int) -> None:
+        o = data_objs[i]
+        try:
+            jr, _u = await grade_answer(
+                question=str(o.get("question", "")),
+                gold_answer=str(o.get("gold_answer", "")),
+                llm_answer=str(o.get("llm_answer", "")),
+                judge_cfg=judge_cfg,
+                encoder=encoder,
+                context_length=DEFAULT_CONTEXT_LENGTH_TOKENS,
+                retries=int(args.retries),
+                semaphore=sem,
+            )
+        except Exception as e:
+            o["judge_result"] = "ERROR"
+            o["error"] = f"{type(e).__name__}: {e}"
+        else:
+            o["judge_result"] = jr
+        finally:
+            pbar.update(1)
+
+    try:
+        if idx_work:
+            await asyncio.gather(*[eval_one(i) for i in idx_work])
+    finally:
+        pbar.close()
+
+    c, t = count_stats_4a(data_objs)
+    hdr = make_jsonl_stats_line(c, t)
+    new_lines = [json.dumps(o, ensure_ascii=False) for o in data_objs]
+    write_jsonl_atomic(path, header_line=hdr, data_line_strings=new_lines)
+    print(f"已写入首行元数据并原子替换。correct={c} total(判分)={t} path={path}")
+    return 0
+
+
+def _async_run(coro) -> int:
+    return int(asyncio.run(coro) or 0)
+
+
+def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-id", type=str, default=None)
-    parser.add_argument("--judge-id", type=str, default="qwen3.5-plus")
+    parser.add_argument(
+        "--evaluation-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="对 jsonl 中 judge_result 为空、且可判分（非 SKIPPED）的样本做判分，并写入首行 _meta_stats。与生成模式二选一。",
+    )
+    parser.add_argument(
+        "--eval-workers",
+        type=int,
+        default=DEFAULT_EVAL_WORKERS,
+        help="评估阶段并发度（仅 --evaluation-file 时有效）。",
+    )
+    parser.add_argument("--gen-workers", type=int, default=DEFAULT_MAX_CONCURRENCY, help="生成阶段并发度。")
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default=None,
+        help="生成用模型（--evaluation-file 时不需要）。",
+    )
+    parser.add_argument(
+        "--judge-id",
+        type=str,
+        default="qwen3.5-plus",
+        help="仅 --evaluation-file 时使用。",
+    )
     parser.add_argument("--num-tasks", type=int)
     parser.add_argument("--save-to")
-    parser.add_argument("--max-concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY)
-    
-    try:
-        raise SystemExit(asyncio.run(run(parser.parse_args())))
-    except KeyboardInterrupt:
-        raise SystemExit(130)
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="与 judge 的 chat 重试次（主生成与 --evaluation-file 下 judge 均适用）。",
+    )
+    args = parser.parse_args()
+
+    if args.evaluation_file is not None:
+        return _async_run(run_evaluate(args))
+    if not args.model_id:
+        raise SystemExit("未指定 --evaluation-file 时，需要 --model-id 做生成。")
+    return _async_run(run_generate(args))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main() or 0)
+    except KeyboardInterrupt:
+        raise SystemExit(130)

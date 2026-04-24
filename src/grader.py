@@ -1,6 +1,7 @@
 import asyncio
 from typing import Tuple
-from utils import ModelConfig, call_chat_completion
+
+from src.utils import ModelConfig, call_chat_completion
 
 def normalize_judge_result(text: str) -> str:
     t = (text or "").strip().upper()
