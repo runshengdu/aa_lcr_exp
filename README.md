@@ -123,40 +123,103 @@ Examples of other types of questions include:
 - **Temporal and Conditional Logic Analysis:** Track time-series trends, implement conditional decision rules, and determine threshold-based alerts or actions
 - **Research and Classification:** Analyze patterns, classify and identify relevant documents to recall specific information
 
-## Running the Evaluation
+## Running the Benchmark
 
 ### Prerequisites
 
-Ensure you have Python installed and the following dependencies:
+Install Python dependencies:
 
 ```bash
 pip install openai tiktoken pyyaml tqdm
 ```
 
-### Configuration
+### Configuration (`models.yaml`)
 
-Configure your models in `models.yaml`. The benchmark uses a judge model (default: `deepseek-chat`) to evaluate answers.
+Define each model under `models:` with:
 
-### Execution
+- `name`
+- `base_url`
+- `api_key` (supports `${ENV_VAR}` expansion)
+- `temperature`
+- `max_tokens`
+- optional `extra_body`
 
-Run the evaluation script `main.py`:
+All model IDs used in CLI flags must exist in `models.yaml`.
+
+### Workflow A: Online Generation + Evaluation (`main.py`)
+
+`main.py` runs in two modes:
+
+1. **Generation mode** (create model answers)
+2. **Evaluation mode** (judge existing answers in a jsonl)
+
+#### 1) Generation
 
 ```bash
-python main.py --model-id <your-model-id>
+python main.py --model-id qwen3.5-flash
 ```
 
-Arguments:
-- `--model-id`: The ID of the model to evaluate (must be defined in `models.yaml`).
-- `--num-tasks`: (Optional) Number of tasks to run (useful for testing).
-- `--save-to`: (Optional) Custom path to save the JSONL results.
-- `--max-concurrency`: (Default: 20) Maximum number of concurrent API calls.
+Useful flags:
 
-### Output
+- `--model-id` (required in generation mode): model to evaluate
+- `--num-tasks`: run only first N pending questions
+- `--save-to`: custom output jsonl path
+- `--gen-workers` (default `20`): generation concurrency
+- `--retries` (default `3`): retry attempts for model calls
 
-Results are saved to `results/<model_id>/<timestamp>.jsonl`.
-- The file includes a real-time statistics header in the first line.
-- A progress bar in the terminal shows completion status and failed tasks.
-- Failed tasks (after retries) are logged to the terminal and excluded from the output file.
+#### 2) Evaluation
+
+```bash
+python main.py --evaluation-file results/qwen3.5-flash/20260423_170212.jsonl --judge-id qwen3.5-plus
+```
+
+Useful flags:
+
+- `--evaluation-file` (required in evaluation mode): existing jsonl to grade
+- `--judge-id` (default `qwen3.5-plus`): judge model from `models.yaml`
+- `--eval-workers` (default `50`): evaluation concurrency
+- `--retries` (default `3`): retry attempts for judge calls
+
+### Workflow B: Batch API Generation (`batch_api/qwen/qwen.py`) + Evaluation
+
+Use this flow when you want asynchronous batch inference for generation.
+
+Run full pipeline:
+
+```bash
+python batch_api/qwen/qwen.py --step all --model-id qwen3.6-flash
+```
+
+Or run step-by-step:
+
+```bash
+python batch_api/qwen/qwen.py --step prepare --model-id qwen3.6-flash
+python batch_api/qwen/qwen.py --step upload --run-dir <run_dir>
+python batch_api/qwen/qwen.py --step create --run-dir <run_dir>
+python batch_api/qwen/qwen.py --step wait --run-dir <run_dir>
+python batch_api/qwen/qwen.py --step collect --run-dir <run_dir>
+```
+
+After `collect`, run judge scoring with `main.py`:
+
+```bash
+python main.py --evaluation-file <results_jsonl_path> --judge-id qwen3.5-plus
+```
+
+Important batch flags:
+
+- `--artifacts-dir` (default `batch_api/qwen/artifacts`): metadata/input/output storage
+- `--needle`: run subdirectory name under artifacts
+- `--completion-window` (default `24h`)
+- `--poll-interval-seconds` (default `10`)
+- `--max-context-window` (default `230400`, i.e. `0.9 * 256k`)
+
+### Outputs and Resume Behavior
+
+- Default results location: `results/<model_id>/<timestamp>.jsonl`
+- `main.py` and batch `collect` both support continuing from existing result files by skipping existing `question_id`s
+- Rows that exceed context limits are written as `SKIPPED` with `skipped_reason`
+- Evaluation writes/updates a first-line `_meta_stats` JSON object with `accuracy`, `correct`, and `total`
 
 ## Prompt Template
 
@@ -173,7 +236,15 @@ task_prompt = (
 
 Reported token counts per question are based on the completed prompt, using the `cl100k_base` tokenizer from `tiktoken`.
 
-The order in which documents are loaded in matters - they should be added to the prompt template in the order of the filenames in `data_source_filenames`.
+The order in which documents are loaded matters: they should be added to the prompt template in the order of the filenames in `data_source_filenames`.
+
+## Code Structure
+
+- `main.py`: online generation and judge evaluation entrypoint
+- `batch_api/qwen/qwen.py`: batch generation pipeline (`prepare/upload/create/wait/collect`)
+- `src/aa_lcr.py`: shared dataset loading, prompt building, JSONL IO, stats
+- `src/utils.py`: model config, env-var expansion, chat completion wrapper
+- `src/grader.py`: judge prompt + normalization (`CORRECT`/`INCORRECT`/`UNKNOWN`)
 
 ## Scoring Approach
 
@@ -190,4 +261,4 @@ judge_prompt = (
 )
 ```
 
-The default judge model is configured in `main.py` (e.g., `doubao-seed-1-8-251228`).
+Default judge model is configured in `main.py` via `--judge-id` (default: `qwen3.5-plus`).
