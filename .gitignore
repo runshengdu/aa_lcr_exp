@@ -1,4 +1,2 @@
 results
-batch_api/qwen/artifacts
-batch_api/moonshot/artifacts
-batch_api/seed/artifacts
+batch_api/**/artifacts
